@@ -213,7 +213,7 @@
             if (data.type === 'register_success') {
                 clientId = data.client_id;
                 console.log('注册成功:', clientId);
-                updateButton('● 已连接', '#28a745', true);
+                updateButton('● 已连接 · 勿操作，断开请刷新', '#28a745', true);
                 showOverlayMask();
                 return;
             }
@@ -395,18 +395,7 @@
         if (!ok) throw new Error('上传超时');
     }
 
-    // 上传参考图
-    async function uploadReferenceImage(base64Data) {
-        await sleep(1000);
-
-        clickByText('add', '*', 'Add Media');
-
-        const filename = `ref_${Math.random().toString(36).slice(2, 10)}.jpg`;
-        await uploadFileToInput(base64Data, filename);
-
-
-
-        await clickByText('Create', 'span', 'add_2');
+    async function selectImgByName(filename) {
 
         const searchInputEl = $x1('//input[@placeholder]');
 
@@ -435,15 +424,53 @@
         }
     }
 
+    // 上传参考图
+    async function uploadReferenceImage(base64Data) {
+        await sleep(1000);
+
+        // clickByText('add', '*', 'Add Media');
+
+        const filename = `ref_${Math.random().toString(36).slice(2, 10)}.jpg`;
+        await uploadFileToInput(base64Data, filename);
+
+
+
+        await clickByText('Create', 'span', 'add_2');
+
+        await selectImgByName(filename)
+
+    }
+
     // 上传首尾帧
     async function uploadFrameImages(frameImages) {
         if (!frameImages?.length) throw new Error('首帧是必需的');
 
+        if (frameImages.length == 1) {
+
+            await sleep(1000);
 
 
-        clickByText('add', '*', 'Add Media')
-        // clickByText('Upload image', '*', 'Add Media')
-        await uploadFileToInput(frameImages[0], 'last.jpg');
+            const filename = `ref_${Math.random().toString(36).slice(2, 10)}.jpg`;
+            await uploadFileToInput(frameImages[0], filename);
+
+
+            await clickByText('Start', 'div', 'arrow_forward');
+            await selectImgByName(filename)
+        }
+
+
+        if (frameImages.length == 2) {
+
+            await sleep(1000);
+
+
+            const filename = `ref_${Math.random().toString(36).slice(2, 10)}.jpg`;
+            await uploadFileToInput(frameImages[1], filename);
+
+
+            await clickByText('Start', 'div', 'arrow_forward');
+            await selectImgByName(filename)
+        }
     }
 
     function sendWsMessage(data) {
@@ -623,19 +650,27 @@
             const useAspect = aspectRatio.indexOf("16:9") > -1 ? "Landscape" : "Portrait"
             await clickByText(useAspect, "*", "arrow_forward") // 设置方向
 
-            if ("Image" == useType) {
+            if ("Image" == useType) {  // 图片
                 await clickByText("arrow_drop_down", "*", "arrow_forward")
                 await clickByText("Nano Banana 2", "*", "arrow_forward")
-            } else {
+            } else {                   // 视频
+                // 选择视频任务类型：首尾帧还是序列
+                if (taskType === 'Frames to Video') { // 
+                    await clickByText("Frames", "button", "arrow_forward")
+                } else {
+                    await clickByText("Ingredients", "button", "arrow_forward")
+                }
+
+                // 设置模型，分两步：下拉、点击
                 await clickByText("arrow_drop_down", "*", "arrow_forward")
-                await clickByText("Veo 3.1 - Quality", "*", "arrow_forward")
+                await clickByText("Veo 3.1 - Fast", "*", "arrow_forward")
             }
 
             // 再上传图片
-            if (taskType === 'Frames to Video') {
+            if (taskType === 'Frames to Video') { // 只有首尾帧点击的是Start + End 按钮
                 sendStatus('上传首尾帧...');
                 await uploadFrameImages(referenceImages);
-            } else if (taskType !== 'Text to Video' && referenceImages?.length) {
+            } else if (taskType !== 'Text to Video' && referenceImages?.length) { // 其它情况都是点 “+”
                 const name = taskType === 'Ingredients to Video' ? '垫图' : '参考图';
                 for (let i = 0; i < referenceImages.length; i++) {
                     sendStatus(`上传${name} ${i + 1}/${referenceImages.length}...`);
@@ -645,9 +680,9 @@
             }
 
 
-            // 执行
-            await clickByText("arrow_forward", "i", "arrow_forward")
-            sendStatus('等待生成...');
+            // 点击 开始生成 按钮
+            // await clickByText("arrow_forward", "i", "arrow_forward")
+            // sendStatus('等待生成...');
 
             // 等待生成完成
             const genOk = await waitUntil(() => {
@@ -670,29 +705,44 @@
             };
 
             let base64Data = null;
-            if (resolution.toUpperCase() === '1K') {
-                const img1k = $x1('//div[@data-item-index="0"]//div[@data-tile-id]//img');
-                const response = await fetch(img1k.src);
-                const blob = await response.blob();
 
-                base64Data = await new Promise((resolve) => {
-                    const reader = new FileReader();
-                    reader.onloadend = () => {
-                        resolve(reader.result.split(',')[1]);
-                    };
-                    reader.readAsDataURL(blob);
-                });
-            } else {
-                const resolutionText = resMap[resolution];
-                if (!resolutionText) throw new Error('未知分辨率: ' + resolution);
-                const dlBtn = $x1(`//div[contains(text(), '${resolutionText}')]`);
-                if (!dlBtn) throw new Error('未找到 ' + resolutionText + ' 下载按钮');
-                dlBtn.click();
+            const mediaEl = $x1('//div[@data-item-index="0"]//div[@data-tile-id]//*[self::img or self::video]')
+            const response = await fetch(mediaEl.src);
+            const blob = await response.blob();
 
-                // 等待图片数据
-                sendStatus('获取数据...');
-                base64Data = await waitForImageData(4 * 60 * 1000);
-            }
+            base64Data = await new Promise((resolve) => {
+                const reader = new FileReader();
+                reader.onloadend = () => {
+                    resolve(reader.result.split(',')[1]);
+                };
+                reader.readAsDataURL(blob);
+            });
+
+
+
+            // if (resolution.toUpperCase() === '1K') {
+            //     const img1k = $x1('//div[@data-item-index="0"]//div[@data-tile-id]//img');
+            //     const response = await fetch(img1k.src);
+            //     const blob = await response.blob();
+
+            //     base64Data = await new Promise((resolve) => {
+            //         const reader = new FileReader();
+            //         reader.onloadend = () => {
+            //             resolve(reader.result.split(',')[1]);
+            //         };
+            //         reader.readAsDataURL(blob);
+            //     });
+            // } else {
+            //     const resolutionText = resMap[resolution];
+            //     if (!resolutionText) throw new Error('未知分辨率: ' + resolution);
+            //     const dlBtn = $x1(`//div[contains(text(), '${resolutionText}')]`);
+            //     if (!dlBtn) throw new Error('未找到 ' + resolutionText + ' 下载按钮');
+            //     dlBtn.click();
+
+            //     // 等待图片数据
+            //     sendStatus('获取数据...');
+            //     base64Data = await waitForImageData(4 * 60 * 1000);
+            // }
 
 
             if (base64Data) {
