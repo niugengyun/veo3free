@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 APP_NAME = "veo3free"
-GITHUB_REPO = "jasper9w/veo3free"
+GITHUB_REPO = "niugengyun/veo3free"
 __version__ = "1.2.1"
 
 
