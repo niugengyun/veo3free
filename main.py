@@ -568,36 +568,6 @@ class Api:
                 await asyncio.sleep(1)
                 continue
 
-            # 检查导入任务的文件是否已存在，如果存在直接跳过
-            if task.get('import_row_number'):
-                output_dir = task.get('output_dir')
-                if output_dir:
-                    if not Path(output_dir).is_absolute():
-                        output_dir = OUTPUT_DIR / output_dir
-                    else:
-                        output_dir = Path(output_dir)
-                else:
-                    output_dir = OUTPUT_DIR
-
-                file_ext = task.get('file_ext', '.png')
-                filepath = output_dir / f"{task['import_row_number']}{file_ext}"
-
-                if filepath.exists():
-                    task['status'] = '已完成'
-                    task['end_time'] = datetime.now().isoformat()
-                    task['saved_path'] = str(filepath.absolute())
-                    task['output_dir_path'] = str(output_dir)
-                    task['status_detail'] = '文件已存在，跳过生成'
-                    # 生成缩略图
-                    if file_ext in ('.png', '.jpg'):
-                        try:
-                            task['preview_base64'] = ImageProcessor.generate_thumbnail(str(filepath), size=(200, 200))
-                        except Exception:
-                            task['preview_base64'] = ''
-                    logger.info(f"[跳过] 文件已存在: {filepath}")
-                    self.task_manager.current_index += 1
-                    continue
-
             task['status'] = '处理中'
             task['start_time'] = datetime.now().isoformat()
             self.task_manager.mark_client_busy(client_id, task['id'])

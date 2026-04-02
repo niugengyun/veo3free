@@ -14,6 +14,9 @@
     let hideTimer = null;
     let statusBtn = null;
     let overlayMask = null;
+    // 用于“按上传图片数量”控制何时允许提交生成（避免未插入完就开始）
+    let __uploadExpectedCount = 0;
+    let __uploadDoneCount = 0;
 
     function getServerOrigin() {
         // 从 inject.js 的 src 推导服务端 origin（避免硬编码端口）
@@ -439,6 +442,9 @@
 
         await selectImgByName(filename)
 
+        await confirmFlowMediaIfDialog()
+        __uploadDoneCount += 1;
+
     }
 
     // 上传首尾帧
@@ -456,6 +462,7 @@
 
             await clickByText('Start', 'div', 'arrow_forward');
             await selectImgByName(filename)
+            await confirmFlowMediaIfDialog()
         }
 
 
@@ -470,7 +477,86 @@
 
             await clickByText('Start', 'div', 'arrow_forward');
             await selectImgByName(filename)
+            await confirmFlowMediaIfDialog()
         }
+    }
+
+    // 修复版：两张图时分别填充 Start/End，避免只填入第二张导致“收尾帧视频逻辑不对”
+    async function uploadFrameImages_v2(frameImages) {
+        if (!frameImages?.length) throw new Error('首帧是必需的');
+
+        if (frameImages.length == 1) {
+            await sleep(1000);
+            const filename = `ref_${Math.random().toString(36).slice(2, 10)}_start.jpg`;
+            await uploadFileToInput(frameImages[0], filename);
+            await clickByText('Start', 'div', 'arrow_forward');
+            await selectImgByName(filename)
+            await confirmFlowMediaIfDialog()
+            __uploadDoneCount += 1;
+            return;
+        }
+
+        if (frameImages.length == 2) {
+            await sleep(1000);
+
+            // 首帧 -> Start
+            const filenameStart = `ref_${Math.random().toString(36).slice(2, 10)}_start.jpg`;
+            await uploadFileToInput(frameImages[0], filenameStart);
+            await clickByText('Start', 'div', 'arrow_forward');
+            await selectImgByName(filenameStart)
+            await confirmFlowMediaIfDialog()
+            __uploadDoneCount += 1;
+
+            // 尾帧 -> End（若文案不是 End，则回退到 Start）
+            const filenameEnd = `ref_${Math.random().toString(36).slice(2, 10)}_end.jpg`;
+            await uploadFileToInput(frameImages[1], filenameEnd);
+            try {
+                await clickByText('End', 'div', 'arrow_forward');
+            } catch (e) {
+                console.warn('[uploadFrameImages_v2] End not found, fallback to Start', e && e.message);
+                await clickByText('Start', 'div', 'arrow_forward');
+            }
+            await selectImgByName(filenameEnd)
+            await confirmFlowMediaIfDialog()
+            __uploadDoneCount += 1;
+            return;
+        }
+
+        throw new Error('首尾帧数量必须为 1 或 2');
+    }
+
+    // 如果素材选择后弹出了对话框（如 Add/Insert/Confirm），点掉它并等待关闭，
+    // 目的是确保引用图/首尾帧真正插入到 Flow 的输入区后，再继续生成。
+    async function confirmFlowMediaIfDialog() {
+        await sleep(500);
+        const dialog = document.querySelector('[role="dialog"]');
+        if (!dialog) return false;
+
+        const buttons = Array.from(dialog.querySelectorAll('button'));
+        const prefer = (t) =>
+            buttons.find((b) => {
+                const x = (b.textContent || '').replace(/\s+/g, ' ').trim();
+                return x === t || x.includes(t);
+            });
+
+        const hit =
+            prefer('Add') ||
+            prefer('Insert') ||
+            prefer('Done') ||
+            prefer('Apply') ||
+            prefer('Confirm') ||
+            buttons.find((b) => (b.getAttribute('type') || '') === 'submit') ||
+            buttons[0];
+
+        if (hit) {
+            console.log('[confirmFlowMediaIfDialog] click', (hit.textContent || '').trim());
+            hit.click();
+            await sleep(800);
+        }
+
+        // 等弹窗消失，避免后续生成太快导致引用图未落位
+        await waitUntil(() => !document.querySelector('[role="dialog"]'), 15000, 300);
+        return true;
     }
 
     function sendWsMessage(data) {
@@ -510,26 +596,23 @@
             cancelable: true,
             inputType: 'deleteContentBackward'
         }));
-        await new Promise(r => setTimeout(r, 50));
 
-        for (let i = 0; i < prompt_text.length; i++) {
-            editorDiv.dispatchEvent(new InputEvent('beforeinput', {
-                bubbles: true,
-                cancelable: true,
-                inputType: 'insertText',
-                data: prompt_text[i]
-            }));
+        // 直接整段粘贴/插入，避免逐字符输入太慢
+        await new Promise(r => setTimeout(r, 80));
+        editorDiv.dispatchEvent(new InputEvent('beforeinput', {
+            bubbles: true,
+            cancelable: true,
+            inputType: 'insertText',
+            data: String(prompt_text)
+        }));
+        editorDiv.dispatchEvent(new InputEvent('input', {
+            bubbles: true,
+            inputType: 'insertText',
+            data: String(prompt_text)
+        }));
 
-            await new Promise(r => setTimeout(r, 10));
-
-            editorDiv.dispatchEvent(new InputEvent('input', {
-                bubbles: true,
-                inputType: 'insertText',
-                data: prompt_text[i]
-            }));
-
-            await new Promise(r => setTimeout(r, 10));
-        }
+        // 给 Slate/React 一帧时间处理
+        await new Promise(r => setTimeout(r, 150));
     }
     window.inputPrompt = inputPrompt
 
@@ -549,6 +632,12 @@
  */
     async function clickByText(containText, elType = '*', anchorText = null) {
         console.log(`containText=${containText}, elType=${elType}, anchorText=${anchorText}`)
+
+        const xpathLiteral = (s) => {
+            const str = String(s ?? '');
+            if (!str.includes("'")) return "'" + str + "'";
+            return 'concat(' + str.split("'").map((part, i) => (i ? ", \"'\", " : "") + "'" + part + "'").join('') + ')';
+        };
 
         const $x = (xpath, ctx = document) => {
             const r = [], q = document.evaluate(xpath, ctx, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
@@ -574,33 +663,190 @@
             return;
         }
 
-        const candidates = Array.from($x(`//${elType}[contains(text(), '${containText}')]`));
-        // console.log(`[clickByText] 找到 ${candidates.length} 个 <${elType}> 候选元素`, candidates);
+        const lit = xpathLiteral(containText);
+        const anchorLit = anchorText ? xpathLiteral(anchorText) : null;
 
-        let target = candidates[0];
+        // UI 渲染存在延迟：找不到候选/锚点时先重试，避免出现 target/anchor undefined
+        const deadline = Date.now() + 10000;
+        while (Date.now() < deadline) {
+            const xpaths = [];
+            // 主搜索：严格使用 elType
+            xpaths.push(`//${elType}[contains(., ${lit})]`);
+            // 兜底：当 elType=button 但真实 DOM 可能是 role=button
+            if (elType === 'button') {
+                xpaths.push(`//*[@role="button" and contains(., ${lit})]`);
+            }
+            // 最后兜底：任何可包含文本的元素（仍会用 anchor 做最近排序）
+            xpaths.push(`//*[contains(., ${lit})]`);
 
-        if (anchorText) {
-            const anchor = $x(`//*[contains(text(), '${anchorText}')]`)[0];
-            // console.log(`[clickByText] 锚点元素:`, anchor);
-            const { x: ax, y: ay } = anchor.getBoundingClientRect();
-            target = candidates.sort((a, b) => {
-                const ra = a.getBoundingClientRect();
-                const rb = b.getBoundingClientRect();
-                return Math.hypot(ra.x - ax, ra.y - ay) - Math.hypot(rb.x - ax, rb.y - ay);
-            })[0];
-            // console.log(`[clickByText] 最近候选元素:`, target);
+            let candidates = [];
+            for (let i = 0; i < xpaths.length; i++) {
+                candidates = Array.from($x(xpaths[i]));
+                if (candidates && candidates.length) break;
+            }
+            let target = candidates[0] || null;
+
+            if (anchorText) {
+                const anchor = $x(`//*[contains(., ${anchorLit})]`)[0];
+                if (!anchor) {
+                    await sleep(200);
+                    continue;
+                }
+                const { x: ax, y: ay } = anchor.getBoundingClientRect();
+                target = candidates.sort((a, b) => {
+                    const ra = a.getBoundingClientRect();
+                    const rb = b.getBoundingClientRect();
+                    return Math.hypot(ra.x - ax, ra.y - ay) - Math.hypot(rb.x - ax, rb.y - ay);
+                })[0];
+            }
+
+            if (!target) {
+                await sleep(200);
+                continue;
+            }
+
+            const { x, y, width, height } = target.getBoundingClientRect();
+            if (!width || !height) {
+                await sleep(200);
+                continue;
+            }
+
+            const cx = x + width / 2, cy = y + height / 2;
+            console.log(`[clickByText] 点击坐标: (${cx.toFixed(0)}, ${cy.toFixed(0)})`, target);
+
+            dispatch(target, cx, cy);
+            console.log(`[clickByText] ✅ 完成`);
+            await new Promise(resolve => setTimeout(resolve, 300));
+            return;
         }
 
-        const { x, y, width, height } = target.getBoundingClientRect();
-        const cx = x + width / 2, cy = y + height / 2;
-        // console.log(`[clickByText] 点击坐标: (${cx.toFixed(0)}, ${cy.toFixed(0)})`, target);
-
-        dispatch(target, cx, cy);
-        // console.log(`[clickByText] ✅ 完成`);
-
-        await new Promise(resolve => setTimeout(resolve, 300));
+        throw new Error(`clickByText 找不到元素：containText=${containText}, elType=${elType}, anchorText=${anchorText}`);
     }
     window.clickByText = clickByText
+
+    // 尝试多个文案，直到成功点击（用于 UI 文案在不同状态/语言下不一致）
+    async function clickByAnyText(needles, elType = '*', anchorText = null) {
+        let lastErr = null;
+        for (let i = 0; i < needles.length; i++) {
+            const t = needles[i];
+            try {
+                await clickByText(t, elType, anchorText);
+                return;
+            } catch (e) {
+                lastErr = e;
+                console.warn('[clickByAnyText] miss', t, e && e.message);
+            }
+        }
+        // 兜底：不使用 anchorText，避免图标文本不匹配
+        if (anchorText) {
+            for (let i = 0; i < needles.length; i++) {
+                const t = needles[i];
+                try {
+                    await clickByText(t, elType, null);
+                    return;
+                } catch (e) {
+                    lastErr = e;
+                    console.warn('[clickByAnyText] fallback miss', t, e && e.message);
+                }
+            }
+        }
+        throw lastErr || new Error('clickByAnyText 全部失败');
+    }
+
+    // ----- DOM 工具（给 selectModel / findModelMenuButton 使用）-----
+    function normUiText(el) {
+        return (el && String(el.textContent || '').replace(/\s+/g, ' ').trim()) || '';
+    }
+
+    function deepQuerySelectorAll(selector, root) {
+        const out = [];
+        const base = root || document;
+
+        function walk(r) {
+            if (!r || !r.querySelectorAll) return;
+            let list;
+            try {
+                list = r.querySelectorAll(selector);
+            } catch (e) {
+                list = [];
+            }
+            for (let i = 0; i < list.length; i++) out.push(list[i]);
+
+            let nodes = [];
+            try {
+                nodes = r.querySelectorAll('*');
+            } catch (e2) {
+                nodes = [];
+            }
+            for (let i = 0; i < nodes.length; i++) {
+                const el = nodes[i];
+                if (el && el.shadowRoot) walk(el.shadowRoot);
+            }
+        }
+
+        walk(base);
+        return out;
+    }
+
+    function clickFirstVisible(el) {
+        if (!el) return false;
+        try {
+            el.scrollIntoView({ block: 'center', inline: 'center' });
+        } catch (e) {
+            // ignore
+        }
+        try {
+            el.click();
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function findModelMenuButton(mode) {
+        const btns = deepQuerySelectorAll('button');
+        let best = null;
+        let bestScore = -1;
+        const want = mode === 'video' ? 'veo' : 'nano';
+        const extraWant = mode === 'video' ? ['fast', 'quality'] : ['banana', 'pro'];
+
+        for (let i = 0; i < btns.length; i++) {
+            const b = btns[i];
+            if (!b || !b.getAttribute) continue;
+            const aria = String(b.getAttribute('aria-haspopup') || '').toLowerCase();
+            const text = normUiText(b).toLowerCase();
+            if (!aria.includes('menu')) continue;
+            if (!text.includes(want)) continue;
+
+            let score = 0;
+            score += 80;
+            for (let j = 0; j < extraWant.length; j++) {
+                if (text.includes(extraWant[j])) score += 10;
+            }
+            if (text.includes('3.1')) score += 10;
+            if (text.includes('nano')) score += 5;
+
+            if (score > bestScore) {
+                bestScore = score;
+                best = b;
+            }
+        }
+        return best;
+    }
+
+    async function selectModel(mode, primaryText, fallbackTexts) {
+        const menuBtn = findModelMenuButton(mode);
+        if (menuBtn) {
+            console.log('[selectModel] click menu button', mode, normUiText(menuBtn).slice(0, 60));
+            clickFirstVisible(menuBtn);
+            await sleep(500);
+        }
+
+        const needles = [primaryText].concat(fallbackTexts || []);
+        // 选项在菜单里，避免使用 arrow_forward 锚点（容易匹配不到）
+        await clickByAnyText(needles, '*', null);
+        await sleep(500);
+    }
 
 
     // async function handleImageGen(taskType, aspectRatio, resolution, referenceImages) {
@@ -633,6 +879,9 @@
         capturedImageData = null;
 
         try {
+            // 重置“上传完成计数”
+            __uploadExpectedCount = 0;
+            __uploadDoneCount = 0;
 
             await clickByText(''); // 重置
 
@@ -651,26 +900,31 @@
             await clickByText(useAspect, "*", "arrow_forward") // 设置方向
 
             if ("Image" == useType) {  // 图片
-                await clickByText("arrow_drop_down", "*", "arrow_forward")
-                await clickByText("Nano Banana 2", "*", "arrow_forward")
+                await selectModel('image', 'Nano Banana 2', ['Nano Banana', 'Nano Banana Pro', 'Banana 2'])
             } else {                   // 视频
                 // 选择视频任务类型：首尾帧还是序列
                 if (taskType === 'Frames to Video') { // 
                     await clickByText("Frames", "button", "arrow_forward")
                 } else {
-                    await clickByText("Ingredients", "button", "arrow_forward")
+                    // Ingredients/References/垫图/素材 等文案可能因页面状态不同而变化
+                    await clickByAnyText(
+                        ['Ingredients', 'References', 'Ingredient', '素材', '垫图'],
+                        'button',
+                        'arrow_forward'
+                    )
                 }
 
                 // 设置模型，分两步：下拉、点击
-                await clickByText("arrow_drop_down", "*", "arrow_forward")
-                await clickByText("Veo 3.1 - Fast", "*", "arrow_forward")
+                await selectModel('video', 'Veo 3.1 - Fast', ['Veo 3.1 - Fast [Lower Priority]', 'Veo 3.1', 'Fast'])
             }
 
             // 再上传图片
             if (taskType === 'Frames to Video') { // 只有首尾帧点击的是Start + End 按钮
+                __uploadExpectedCount = referenceImages?.length || 0;
                 sendStatus('上传首尾帧...');
-                await uploadFrameImages(referenceImages);
+                await uploadFrameImages_v2(referenceImages);
             } else if (taskType !== 'Text to Video' && referenceImages?.length) { // 其它情况都是点 “+”
+                __uploadExpectedCount = referenceImages?.length || 0;
                 const name = taskType === 'Ingredients to Video' ? '垫图' : '参考图';
                 for (let i = 0; i < referenceImages.length; i++) {
                     sendStatus(`上传${name} ${i + 1}/${referenceImages.length}...`);
@@ -680,20 +934,56 @@
             }
 
 
-            // 点击 开始生成 按钮
-            // await clickByText("arrow_forward", "i", "arrow_forward")
+            // 点击 开始生成 按钮（关键：否则会直接下载上传预览图，而不是视频成品）
+            // 等待：确保引用图片全部“插入完成”（基于上传完成计数）
+            if (__uploadExpectedCount > 0) {
+                await waitUntil(() => __uploadDoneCount >= __uploadExpectedCount, 60000, 200);
+            }
+
+            sendStatus('提交生成...');
+            await sleep(600);
+
+            // 先记录当前 tile 里已有的媒体 src，生成后需要变化才算成功
+            const outputContainerBefore = $x1('//div[@data-item-index="0"]//div[@data-tile-id]');
+            const expectVideo = useType === 'Video';
+            const existingMediaElBefore = expectVideo ? $x1('.//video', outputContainerBefore) : $x1('.//img', outputContainerBefore);
+            const existingSrcBefore = existingMediaElBefore && existingMediaElBefore.src ? String(existingMediaElBefore.src) : '';
+
+            // 尝试点击“提交/生成”按钮：优先点 arrow_forward 图标所在按钮
+            let genBtn = null;
+            try {
+                genBtn = $x1('//button[.//i[contains(., "arrow_forward")]]') ||
+                    $x1('//*[self::button or @role="button"][.//i[contains(., "arrow_forward")]]');
+            } catch (e) {
+                genBtn = null;
+            }
+            if (genBtn) {
+                genBtn.click();
+            } else {
+                // 兜底：点按钮文本
+                try {
+                    await clickByAnyText(['Generate', '生成', 'Create', '提交'], 'button', null);
+                } catch (e2) {
+                    // 最后兜底：还是尝试点击箭头图标
+                    await clickByText('arrow_forward', '*', null);
+                }
+            }
+
             // sendStatus('等待生成...');
 
             // 等待生成完成
             const genOk = await waitUntil(() => {
                 const container = $x1('//div[@data-item-index="0"]//div[@data-tile-id]');
                 if (!container) return false;
-                if ($x1(".//img | .//video", container)) return true;
+                const mediaEl = expectVideo ? $x1('.//video', container) : $x1('.//img', container);
+                if (mediaEl && mediaEl.src && String(mediaEl.src).length > 12 && String(mediaEl.src) !== existingSrcBefore) {
+                    return true;
+                }
                 const text = container.innerText;
                 if (text?.trim().endsWith('%')) sendStatus('进度 ' + text);
                 else if (text && !text.includes('\n')) throw new Error('生成失败: ' + text);
                 return false;
-            }, 120000);
+            }, expectVideo ? 300000 : 120000);
             if (!genOk) throw new Error('生成超时');
 
             // 下载
@@ -706,7 +996,10 @@
 
             let base64Data = null;
 
-            const mediaEl = $x1('//div[@data-item-index="0"]//div[@data-tile-id]//*[self::img or self::video]')
+            const mediaEl = expectVideo
+                ? $x1('//div[@data-item-index="0"]//div[@data-tile-id]//video')
+                : $x1('//div[@data-item-index="0"]//div[@data-tile-id]//img');
+            if (!mediaEl || !mediaEl.src) throw new Error('未找到生成媒体资源');
             const response = await fetch(mediaEl.src);
             const blob = await response.blob();
 
