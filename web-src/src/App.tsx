@@ -37,7 +37,11 @@ const TASK_TYPES = [
   { id: 'Ingredients to Video', label: '图生视频', icon: Sparkles, color: 'emerald' },
 ];
 
-const ASPECT_RATIOS = ['16:9', '9:16'];
+const IMAGE_ASPECT_RATIOS = ['16:9', '4:3', '1:1', '3:4', '9:16'];
+const VIDEO_ASPECT_RATIOS = ['9:16', '16:9'];
+const IMAGE_COUNTS = ['x1', 'x2', 'x3', 'x4'];
+const IMAGE_MODELS = ['Nano Banana 2', 'Nano Banana Pro', 'Imagen 4'];
+const VIDEO_MODELS = ['Veo 3.1 - Fast [Lower Priority]', 'Veo 3.1 - Lite', 'Veo 3.1 - Fast', 'Veo 3.1 - Quality'];
 
 function formatDuration(startTime?: string, endTime?: string): string {
   if (!startTime) return '';
@@ -143,7 +147,30 @@ function TaskCard({ task, index, onRetry, onRun }: TaskCardProps) {
             <span className="text-xs px-2 py-0.5 rounded-full bg-violet-100 text-violet-600">
               {typeInfo?.label || task.task_type}
             </span>
-            <span className="text-xs text-zinc-400">{task.aspect_ratio} · {task.resolution}</span>
+            {task.aspect_ratio && (
+              <span className="text-xs px-2 py-0.5 rounded-full bg-zinc-100 text-zinc-500">
+                {task.aspect_ratio}
+              </span>
+            )}
+            {(() => {
+              const parts = (task.resolution || '').split('|');
+              const count = parts[0];
+              const model = parts[1];
+              return (
+                <>
+                  {count && (
+                    <span className="text-xs px-2 py-0.5 rounded-full bg-zinc-100 text-zinc-500">
+                      {count}
+                    </span>
+                  )}
+                  {model && (
+                    <span className="text-xs px-2 py-0.5 rounded-full bg-zinc-100 text-zinc-500 max-w-[140px] truncate">
+                      {model}
+                    </span>
+                  )}
+                </>
+              );
+            })()}
             {duration && (
               <span className={`text-xs px-2 py-0.5 rounded-full ${task.status === '处理中' ? 'bg-blue-100 text-blue-600' : 'bg-zinc-100 text-zinc-500'}`}>
                 ⏱ {duration}
@@ -215,7 +242,10 @@ function App() {
   const [prompt, setPrompt] = useState('');
   const [taskType, setTaskType] = useState('Create Image');
   const [aspectRatio, setAspectRatio] = useState('16:9');
-  const [resolution, setResolution] = useState('1K');
+  const [imageCount, setImageCount] = useState('x1');
+  const [imageModel, setImageModel] = useState('Nano Banana 2');
+  const [videoCount, setVideoCount] = useState('x1');
+  const [videoModel, setVideoModel] = useState('Veo 3.1 - Fast [Lower Priority]');
   const [refImages, setRefImages] = useState<string[]>([]);
   const [status, setStatus] = useState<Status>({ client_count: 0, busy_count: 0, is_running: false, tasks: [] });
   const [systemInfo, setSystemInfo] = useState<SystemInfo | null>(null);
@@ -230,9 +260,7 @@ function App() {
 
   const api = typeof window !== 'undefined' ? window.pywebview?.api : null;
 
-  const resolutions = taskType === 'Create Image'
-    ? ['1K', '2K', '4K']
-    : ['720p', '1080p'];
+  const aspectRatios = taskType === 'Create Image' ? IMAGE_ASPECT_RATIOS : VIDEO_ASPECT_RATIOS;
 
   // 缓存任务统计，避免每次都重新计算
   const { completed, processing, failed, progress } = useMemo(() => {
@@ -286,6 +314,16 @@ function App() {
     } catch (e) {
       console.error('执行任务失败:', e);
     }
+  };
+
+  // 同步当前设置到网页
+  const syncPage = (
+    type = taskType,
+    ratio = aspectRatio,
+    count = type === 'Create Image' ? imageCount : videoCount,
+    model = type === 'Create Image' ? imageModel : videoModel
+  ) => {
+    if (api) api.sync_page_settings(type, ratio, count, model);
   };
 
   const selectedType = TASK_TYPES.find(t => t.id === taskType);
@@ -354,30 +392,25 @@ function App() {
     return () => { cancelled = true; };
   }, [ready, api]);
 
-  // 任务类型或比例变化时重置分辨率
+  // 任务类型切换时重置比例（图片独有比例切换到视频时需重置）
   useEffect(() => {
-    const currentResolutions = taskType === 'Create Image'
-      ? ['1K', '2K', '4K']
-      : ['720p', '1080p'];
-
-    if (!currentResolutions.includes(resolution)) {
-      setResolution(currentResolutions[currentResolutions.length - 1]);
+    const ratios = taskType === 'Create Image' ? IMAGE_ASPECT_RATIOS : VIDEO_ASPECT_RATIOS;
+    if (!ratios.includes(aspectRatio)) {
+      setAspectRatio('16:9');
     }
     if (taskType === 'Text to Video') {
       setRefImages([]);
     }
-  }, [taskType, aspectRatio]);
+  }, [taskType]);
 
   const addTask = async () => {
     if (!prompt.trim() || !ready || !api) return;
-    await api.add_task(prompt.trim(), taskType, aspectRatio, resolution, refImages, '');
+    const encodedResolution = taskType === 'Create Image'
+      ? `${imageCount}|${imageModel}`
+      : `${videoCount}|${videoModel}`;
+    await api.add_task(prompt.trim(), taskType, aspectRatio, encodedResolution, refImages, '');
     setPrompt('');
     setRefImages([]);
-
-    // 添加任务后自动开始执行
-    setTimeout(() => {
-      api.start_execution();
-    }, 300);
   };
 
   const selectImages = async () => {
@@ -591,7 +624,11 @@ function App() {
                             return (
                               <button
                                 key={type.id}
-                                onClick={() => { setTaskType(type.id); setShowTypeDropdown(false); }}
+                                onClick={() => {
+                                  setTaskType(type.id);
+                                  setShowTypeDropdown(false);
+                                  syncPage(type.id, aspectRatio, imageCount, imageModel);
+                                }}
                                 className={`w-full flex items-center gap-3 p-4 hover:bg-zinc-50 transition-colors ${
                                   taskType === type.id ? 'bg-zinc-50' : ''
                                 }`}
@@ -659,13 +696,14 @@ function App() {
                   </div>
 
                   {/* Options */}
-                  <div className="flex gap-3">
-                    <div className="flex-1 bg-white rounded-xl border border-zinc-200 p-1">
+                  <div className="space-y-2">
+                    {/* 比例选择 */}
+                    <div className="bg-white rounded-xl border border-zinc-200 p-1">
                       <div className="flex">
-                        {ASPECT_RATIOS.map((ratio) => (
+                        {aspectRatios.map((ratio) => (
                           <button
                             key={ratio}
-                            onClick={() => setAspectRatio(ratio)}
+                            onClick={() => { setAspectRatio(ratio); syncPage(taskType, ratio, imageCount, imageModel); }}
                             className={`flex-1 py-2.5 text-xs font-medium rounded-lg transition-all ${
                               aspectRatio === ratio
                                 ? 'bg-zinc-900 text-white'
@@ -677,23 +715,78 @@ function App() {
                         ))}
                       </div>
                     </div>
-                    <div className="flex-1 bg-white rounded-xl border border-zinc-200 p-1">
-                      <div className="flex">
-                        {resolutions.map((res) => (
-                          <button
-                            key={res}
-                            onClick={() => setResolution(res)}
-                            className={`flex-1 py-2.5 text-xs font-medium rounded-lg transition-all ${
-                              resolution === res
-                                ? 'bg-zinc-900 text-white'
-                                : 'text-zinc-500 hover:text-zinc-700'
-                            }`}
-                          >
-                            {res}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
+
+                    {/* 生成图片：数量 + 模型 */}
+                    {taskType === 'Create Image' && (
+                      <>
+                        <div className="bg-white rounded-xl border border-zinc-200 p-1">
+                          <div className="flex">
+                            {IMAGE_COUNTS.map((cnt) => (
+                              <button
+                                key={cnt}
+                                onClick={() => { setImageCount(cnt); syncPage(taskType, aspectRatio, cnt, imageModel); }}
+                                className={`flex-1 py-2.5 text-xs font-medium rounded-lg transition-all ${
+                                  imageCount === cnt ? 'bg-zinc-900 text-white' : 'text-zinc-500 hover:text-zinc-700'
+                                }`}
+                              >
+                                {cnt}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                        <div className="bg-white rounded-xl border border-zinc-200 p-1">
+                          <div className="flex">
+                            {IMAGE_MODELS.map((mdl) => (
+                              <button
+                                key={mdl}
+                                onClick={() => { setImageModel(mdl); syncPage(taskType, aspectRatio, imageCount, mdl); }}
+                                className={`flex-1 py-2 text-xs font-medium rounded-lg transition-all ${
+                                  imageModel === mdl ? 'bg-zinc-900 text-white' : 'text-zinc-500 hover:text-zinc-700'
+                                }`}
+                              >
+                                {mdl}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      </>
+                    )}
+
+                    {/* 视频类型：数量 + 模型 */}
+                    {taskType !== 'Create Image' && (
+                      <>
+                        <div className="bg-white rounded-xl border border-zinc-200 p-1">
+                          <div className="flex">
+                            {IMAGE_COUNTS.map((cnt) => (
+                              <button
+                                key={cnt}
+                                onClick={() => { setVideoCount(cnt); syncPage(taskType, aspectRatio, cnt, videoModel); }}
+                                className={`flex-1 py-2.5 text-xs font-medium rounded-lg transition-all ${
+                                  videoCount === cnt ? 'bg-zinc-900 text-white' : 'text-zinc-500 hover:text-zinc-700'
+                                }`}
+                              >
+                                {cnt}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                        <div className="bg-white rounded-xl border border-zinc-200 p-1">
+                          <div className="flex">
+                            {VIDEO_MODELS.map((mdl) => (
+                              <button
+                                key={mdl}
+                                onClick={() => { setVideoModel(mdl); syncPage(taskType, aspectRatio, videoCount, mdl); }}
+                                className={`flex-1 py-2 text-xs font-medium rounded-lg transition-all ${
+                                  videoModel === mdl ? 'bg-zinc-900 text-white' : 'text-zinc-500 hover:text-zinc-700'
+                                }`}
+                              >
+                                {mdl}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      </>
+                    )}
                   </div>
 
                   {/* Submit Button */}

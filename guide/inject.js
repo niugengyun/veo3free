@@ -13,10 +13,92 @@
     let shouldConnect = true;
     let hideTimer = null;
     let statusBtn = null;
+
+    const DEBUG_SKIP_SUBMIT_LS = 'veo3free_debug_skip_submit';
+
+    function loadDebugSkipSubmit() {
+        try {
+            return localStorage.getItem(DEBUG_SKIP_SUBMIT_LS) === '1';
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function saveDebugSkipSubmit(v) {
+        try {
+            localStorage.setItem(DEBUG_SKIP_SUBMIT_LS, v ? '1' : '0');
+        } catch (e) {}
+    }
+
+    let __debugSkipSubmit = loadDebugSkipSubmit();
+
+    function ensureDebugToggleButton() {
+        const mount = () => {
+            const root = document.body || document.documentElement;
+            if (!root) return false;
+            let el = document.getElementById('veo3free-debug-toggle');
+            if (!el) {
+                el = document.createElement('button');
+                el.id = 'veo3free-debug-toggle';
+                el.type = 'button';
+                el.title = '打开：只跑到选图/设参，不点生成；关闭：正常提交';
+                el.style.cssText = [
+                    'position:fixed',
+                    'left:50%',
+                    'bottom:32px',
+                    'transform:translateX(-50%)',
+                    'z-index:2147483646',
+                    'padding:14px 26px',
+                    'min-width:220px',
+                    'font-size:15px',
+                    'font-weight:700',
+                    'border-radius:14px',
+                    'cursor:pointer',
+                    'pointer-events:auto',
+                    'font-family:system-ui,-apple-system,BlinkMacSystemFont,sans-serif',
+                    'letter-spacing:0.03em'
+                ].join(';');
+                function syncLabel() {
+                    if (__debugSkipSubmit) {
+                        el.textContent = '调试 ON · 不提交生成';
+                        el.style.background = 'linear-gradient(145deg,#f97316,#ea580c)';
+                        el.style.color = '#fff';
+                        el.style.border = '3px solid #c2410c';
+                        el.style.boxShadow = '0 6px 24px rgba(234,88,12,0.55),0 2px 8px rgba(0,0,0,0.2)';
+                    } else {
+                        el.textContent = '调试 OFF · 正常提交';
+                        el.style.background = 'linear-gradient(145deg,#3b82f6,#1d4ed8)';
+                        el.style.color = '#fff';
+                        el.style.border = '3px solid #1e40af';
+                        el.style.boxShadow = '0 6px 24px rgba(37,99,235,0.45),0 2px 8px rgba(0,0,0,0.2)';
+                    }
+                }
+                el.onclick = (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    __debugSkipSubmit = !__debugSkipSubmit;
+                    saveDebugSkipSubmit(__debugSkipSubmit);
+                    syncLabel();
+                };
+                syncLabel();
+            }
+            if (!root.contains(el)) {
+                root.appendChild(el);
+            }
+            return true;
+        };
+        if (!mount()) {
+            setTimeout(() => {
+                if (!mount()) setTimeout(mount, 120);
+            }, 0);
+        }
+    }
     let overlayMask = null;
     // 用于“按上传图片数量”控制何时允许提交生成（避免未插入完就开始）
     let __uploadExpectedCount = 0;
     let __uploadDoneCount = 0;
+    /** executeTask 执行期间附带，便于落盘后 status 仍能更新到对应任务 */
+    let _currentStatusTaskId = null;
 
     function getServerOrigin() {
         // 从 inject.js 的 src 推导服务端 origin（避免硬编码端口）
@@ -51,6 +133,7 @@
     // 创建/更新状态按钮
     function createStatusButton() {
         if (statusBtn) return statusBtn;
+        ensureDebugToggleButton();
         statusBtn = document.createElement('div');
         statusBtn.style.cssText = `
             position: fixed;
@@ -86,6 +169,7 @@
     }
 
     function updateButton(text, color, pulse = false) {
+        ensureDebugToggleButton();
         if (!statusBtn) createStatusButton();
         statusBtn.textContent = text;
         statusBtn.style.background = color;
@@ -152,21 +236,22 @@
             ">刷新</a>页面
         `;
 
-        // overlayMask.appendChild(tip);
-        // document.body.appendChild(overlayMask);
+        overlayMask.appendChild(tip);
+        document.body.appendChild(overlayMask);
 
-        // 刷新链接点击事件
-        document.getElementById('refresh-link').addEventListener('click', () => {
-            location.reload();
-        });
-
-        // 鼠标悬停效果
-        document.getElementById('refresh-link').addEventListener('mouseenter', (e) => {
-            e.target.style.color = '#81d4fa';
-        });
-        document.getElementById('refresh-link').addEventListener('mouseleave', (e) => {
-            e.target.style.color = '#4fc3f7';
-        });
+        // 先插入 DOM，再绑定事件
+        const refreshLink = document.getElementById('refresh-link');
+        if (refreshLink) {
+            refreshLink.addEventListener('click', () => {
+                location.reload();
+            });
+            refreshLink.addEventListener('mouseenter', (e) => {
+                e.target.style.color = '#81d4fa';
+            });
+            refreshLink.addEventListener('mouseleave', (e) => {
+                e.target.style.color = '#4fc3f7';
+            });
+        }
     }
 
     // 隐藏全屏遮罩
@@ -217,7 +302,24 @@
                 clientId = data.client_id;
                 console.log('注册成功:', clientId);
                 updateButton('● 已连接 · 勿操作，断开请刷新', '#28a745', true);
-                showOverlayMask();
+                // showOverlayMask();
+                return;
+            }
+
+            if (data.type === 'switch_mode') {
+                // 兼容旧消息格式
+                syncSettingsInPage(data.task_type, '16:9', 'x1',
+                    data.task_type === 'Create Image' ? 'Nano Banana 2' : 'Veo 3.1 - Fast [Lower Priority]');
+                return;
+            }
+
+            if (data.type === 'sync_settings') {
+                syncSettingsInPage(
+                    data.task_type || 'Create Image',
+                    data.aspect_ratio || '16:9',
+                    data.image_count || 'x1',
+                    data.image_model || (data.task_type === 'Create Image' ? 'Nano Banana 2' : 'Veo 3.1 - Fast [Lower Priority]')
+                );
                 return;
             }
 
@@ -360,16 +462,13 @@
 
     const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-    // 通用等待函数（先等待再检查，避免立即满足条件）
+    // 通用轮询：先立即检查一次，再按 interval 重试（避免无谓多等一整轮）
     async function waitUntil(conditionFn, timeout = 60000, interval = 1000) {
         const start = Date.now();
         while (Date.now() - start < timeout) {
-            await sleep(interval);
             const succ = await conditionFn();
-            console.log("waitUntil=", succ)
-            if (succ) {
-                return true
-            }
+            if (succ) return true;
+            await sleep(interval);
         }
         return false;
     }
@@ -393,58 +492,155 @@
         fileInput.files = dt.files;
         fileInput.dispatchEvent(new Event('change', { bubbles: true }));
 
-        await sleep(1000);
-        const ok = await waitUntil(() => $x1('//div[@data-item-index="0"]/div/div[1]//img'));
+        await sleep(200);
+        const ok = await waitUntil(() => $x1('//div[@data-item-index="0"]/div/div[1]//img'), 30000, 120);
         if (!ok) throw new Error('上传超时');
     }
 
-    async function selectImgByName(filename) {
-
-        const searchInputEl = $x1('//input[@placeholder]');
-
-        console.warn('searchInputEl', searchInputEl)
-        // 触发搜索输入
-        if (searchInputEl) {
-            function setReactInputValue(element, value) {
-                // 获取 React 内部用的原生 value setter（绕过 React 的追踪）
-                const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
-                    window.HTMLInputElement.prototype,
-                    'value'
-                ).set;
-
-                nativeInputValueSetter.call(element, value);
-
-                // 派发 input 事件，触发 React 的 onChange 合成事件
-                element.dispatchEvent(new Event('input', { bubbles: true }));
-
-                // 部分组件还监听了 change，一并派发保险
-                element.dispatchEvent(new Event('change', { bubbles: true }));
-            }
-            setReactInputValue(searchInputEl, filename);
-            await sleep(1000);
-            await clickByText(filename, 'div')
-
+    // 在弹框/列表根节点内找最可能为「文件名卡片」的元素（避免点到整块容器）
+    function findBestFilenameTile(root, filename) {
+        if (!root || !filename) return null;
+        const candidates = [];
+        for (const el of root.querySelectorAll('div, button, [role="button"], li')) {
+            if (!el.offsetParent) continue;
+            const t = (el.textContent || '').trim();
+            if (!t.includes(filename)) continue;
+            const r = el.getBoundingClientRect();
+            const area = r.width * r.height;
+            if (area < 150) continue;
+            if (area > 1e6) continue;
+            candidates.push({ el, area, textLen: t.length });
         }
+        if (!candidates.length) return null;
+        candidates.sort((a, b) => {
+            if (a.textLen !== b.textLen) return a.textLen - b.textLen;
+            return a.area - b.area;
+        });
+        return candidates[0].el;
+    }
+
+    // rootEl 传入 [role="dialog"] 时只在弹框内搜素与点击，与 uploadReferenceImage 中 Create 流程一致
+    function findMediaSearchInput(root) {
+        if (!root) return null;
+        return root.querySelector('input[placeholder]')
+            || root.querySelector('input[type="search"]')
+            || root.querySelector('input:not([type="hidden"])');
+    }
+
+    async function selectImgByName(filename, rootEl) {
+        let searchInputEl = null;
+        if (rootEl) {
+            searchInputEl = findMediaSearchInput(rootEl);
+            if (!searchInputEl) {
+                await waitUntil(() => {
+                    searchInputEl = findMediaSearchInput(rootEl);
+                    return !!searchInputEl;
+                }, 6000, 80);
+            }
+        }
+        if (!searchInputEl) {
+            searchInputEl = $x1('//input[@placeholder]');
+        }
+
+        if (!searchInputEl) {
+            console.warn('[selectImgByName] 未找到搜索框');
+            return;
+        }
+
+        function setReactInputValue(element, value) {
+            const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+                window.HTMLInputElement.prototype,
+                'value'
+            ).set;
+            nativeInputValueSetter.call(element, value);
+            element.dispatchEvent(new Event('input', { bubbles: true }));
+            element.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        setReactInputValue(searchInputEl, filename);
+        await sleep(220);
+
+        const clickRoot = rootEl || document.querySelector('[role="dialog"]') || document;
+        let tile = findBestFilenameTile(clickRoot, filename);
+        if (!tile && clickRoot) {
+            await sleep(120);
+            tile = findBestFilenameTile(clickRoot, filename);
+        }
+        if (tile) {
+            dispatchClick(tile);
+            await sleep(120);
+            return;
+        }
+        try {
+            await clickByText(filename, 'div', 'add_2');
+        } catch (e1) {
+            try {
+                await clickByText(filename, 'div');
+            } catch (e2) {
+                console.warn('[selectImgByName] 点击失败', filename, e2 && e2.message);
+            }
+        }
+    }
+
+    // 图生视频 / 参考图：带 add_2 图标的按钮（aria-haspopup=dialog），打开媒体库
+    function findAddMediaButton() {
+        const btns = document.querySelectorAll('button[aria-haspopup="dialog"]');
+        for (let i = 0; i < btns.length; i++) {
+            const icons = btns[i].querySelectorAll('i.google-symbols, i.material-icons');
+            for (let j = 0; j < icons.length; j++) {
+                if ((icons[j].textContent || '').trim() === 'add_2') {
+                    return btns[i];
+                }
+            }
+        }
+        return null;
+    }
+
+    async function clickAddMediaDialogButton() {
+        let btn = findAddMediaButton();
+        if (!btn) {
+            await waitUntil(() => !!(btn = findAddMediaButton()), 4000, 80);
+        }
+        if (btn) {
+            dispatchClick(btn);
+            await sleep(120);
+            return true;
+        }
+        try {
+            await clickByText('Create', 'span', 'add_2');
+            return true;
+        } catch (e) {
+            console.warn('[media] add_2 兜底失败', e && e.message);
+            return false;
+        }
+    }
+
+    // 参考图上传后进媒体库：先点 add_2 打开弹框，再搜索选图
+    async function selectUploadedImageInMediaDialog(filename) {
+        await clickAddMediaDialogButton();
+        await sleep(120);
+        const dlg = document.querySelector('[role="dialog"]');
+        await selectImgByName(filename, dlg);
+        await confirmFlowMediaIfDialog();
+    }
+
+    // 弹框已由 Start/End 等打开：不再点 Create（避免 clickByText 长时间重试），直接搜文件名并确认
+    async function selectUploadedImageInOpenDialog(filename) {
+        const dlg = document.querySelector('[role="dialog"]');
+        if (!dlg) {
+            throw new Error('选图弹框未打开');
+        }
+        await selectImgByName(filename, dlg);
+        await confirmFlowMediaIfDialog();
     }
 
     // 上传参考图
     async function uploadReferenceImage(base64Data) {
-        await sleep(1000);
-
-        // clickByText('add', '*', 'Add Media');
+        await sleep(200);
 
         const filename = `ref_${Math.random().toString(36).slice(2, 10)}.jpg`;
         await uploadFileToInput(base64Data, filename);
-
-
-
-        await clickByText('Create', 'span', 'add_2');
-
-        await selectImgByName(filename)
-
-        await confirmFlowMediaIfDialog()
+        await selectUploadedImageInMediaDialog(filename);
         __uploadDoneCount += 1;
-
     }
 
     // 上传首尾帧
@@ -461,8 +657,11 @@
 
 
             await clickByText('Start', 'div', 'arrow_forward');
-            await selectImgByName(filename)
-            await confirmFlowMediaIfDialog()
+            if (await waitUntil(() => document.querySelector('[role="dialog"]') !== null, 5000, 80)) {
+                await selectUploadedImageInOpenDialog(filename);
+            } else {
+                await selectUploadedImageInMediaDialog(filename);
+            }
         }
 
 
@@ -476,59 +675,70 @@
 
 
             await clickByText('Start', 'div', 'arrow_forward');
-            await selectImgByName(filename)
-            await confirmFlowMediaIfDialog()
+            if (await waitUntil(() => document.querySelector('[role="dialog"]') !== null, 5000, 80)) {
+                await selectUploadedImageInOpenDialog(filename);
+            } else {
+                await selectUploadedImageInMediaDialog(filename);
+            }
         }
     }
 
-    // 修复版：两张图时分别填充 Start/End，避免只填入第二张导致“收尾帧视频逻辑不对”
+    // 找到首尾帧插槽按钮（index=0 -> Start，index=1 -> End）
+    // 页面结构：div[type="button"].jekiem，按位置区分 Start / End
+    function findFrameSlotButton(index) {
+        const btns = Array.from(document.querySelectorAll('div[type="button"].jekiem'));
+        return btns[index] || null;
+    }
+
+    // 点击首尾帧插槽，找不到 End 时回退到 Start
+    async function clickFrameSlot(index) {
+        await waitUntil(() => document.querySelectorAll('div[type="button"].jekiem').length > 0, 5000, 80);
+        const btn = findFrameSlotButton(index);
+        if (btn) { btn.click(); return; }
+        if (index === 1) {
+            console.warn('[frame] End 插槽未找到，回退到 Start');
+            findFrameSlotButton(0)?.click();
+        } else {
+            throw new Error('Start 插槽未找到');
+        }
+    }
+
+    // 上传首尾帧：先等上传完成（资源进库），再点 Start/End 打开选图，最后搜索选中并确认
     async function uploadFrameImages_v2(frameImages) {
         if (!frameImages?.length) throw new Error('首帧是必需的');
 
-        if (frameImages.length == 1) {
-            await sleep(1000);
-            const filename = `ref_${Math.random().toString(36).slice(2, 10)}_start.jpg`;
-            await uploadFileToInput(frameImages[0], filename);
-            await clickByText('Start', 'div', 'arrow_forward');
-            await selectImgByName(filename)
-            await confirmFlowMediaIfDialog()
-            __uploadDoneCount += 1;
-            return;
+        await waitUntil(() => document.querySelectorAll('div[type="button"].jekiem').length > 0, 8000, 80);
+
+        // 首帧：uploadFileToInput 会等到主区域缩略图出现，表示上传完成
+        const filenameStart = `ref_${Math.random().toString(36).slice(2, 10)}_start.jpg`;
+        await uploadFileToInput(frameImages[0], filenameStart);
+        await clickFrameSlot(0);
+        if (!await waitUntil(() => document.querySelector('[role="dialog"]') !== null, 5000, 80)) {
+            throw new Error('首帧选图对话框未打开');
         }
+        await selectUploadedImageInOpenDialog(filenameStart);
+        __uploadDoneCount += 1;
 
-        if (frameImages.length == 2) {
-            await sleep(1000);
+        if (frameImages.length < 2) return;
 
-            // 首帧 -> Start
-            const filenameStart = `ref_${Math.random().toString(36).slice(2, 10)}_start.jpg`;
-            await uploadFileToInput(frameImages[0], filenameStart);
-            await clickByText('Start', 'div', 'arrow_forward');
-            await selectImgByName(filenameStart)
-            await confirmFlowMediaIfDialog()
-            __uploadDoneCount += 1;
+        await sleep(200);
+        await waitUntil(() => document.querySelectorAll('div[type="button"].jekiem').length > 0, 8000, 80);
 
-            // 尾帧 -> End（若文案不是 End，则回退到 Start）
-            const filenameEnd = `ref_${Math.random().toString(36).slice(2, 10)}_end.jpg`;
-            await uploadFileToInput(frameImages[1], filenameEnd);
-            try {
-                await clickByText('End', 'div', 'arrow_forward');
-            } catch (e) {
-                console.warn('[uploadFrameImages_v2] End not found, fallback to Start', e && e.message);
-                await clickByText('Start', 'div', 'arrow_forward');
-            }
-            await selectImgByName(filenameEnd)
-            await confirmFlowMediaIfDialog()
-            __uploadDoneCount += 1;
-            return;
+        const filenameEnd = `ref_${Math.random().toString(36).slice(2, 10)}_end.jpg`;
+        await uploadFileToInput(frameImages[1], filenameEnd);
+        await clickFrameSlot(1);
+        if (!await waitUntil(() => document.querySelector('[role="dialog"]') !== null, 5000, 80)) {
+            throw new Error('尾帧选图对话框未打开');
         }
-
-        throw new Error('首尾帧数量必须为 1 或 2');
+        await selectUploadedImageInOpenDialog(filenameEnd);
+        __uploadDoneCount += 1;
     }
+
 
     // 如果素材选择后弹出了对话框（如 Add/Insert/Confirm），点掉它并等待关闭，
     // 目的是确保引用图/首尾帧真正插入到 Flow 的输入区后，再继续生成。
     async function confirmFlowMediaIfDialog() {
-        await sleep(500);
+        await sleep(120);
         const dialog = document.querySelector('[role="dialog"]');
         if (!dialog) return false;
 
@@ -549,13 +759,12 @@
             buttons[0];
 
         if (hit) {
-            console.log('[confirmFlowMediaIfDialog] click', (hit.textContent || '').trim());
             hit.click();
-            await sleep(800);
+            await sleep(350);
         }
 
         // 等弹窗消失，避免后续生成太快导致引用图未落位
-        await waitUntil(() => !document.querySelector('[role="dialog"]'), 15000, 300);
+        await waitUntil(() => !document.querySelector('[role="dialog"]'), 15000, 120);
         return true;
     }
 
@@ -568,7 +777,11 @@
 
     function sendStatus(msg) {
         console.log('📌', msg);
-        sendWsMessage({ type: 'status', message: msg });
+        const payload = { type: 'status', message: msg };
+        if (_currentStatusTaskId) {
+            payload.task_id = _currentStatusTaskId;
+        }
+        sendWsMessage(payload);
     }
 
     function sendResult(taskId, error) {
@@ -715,8 +928,7 @@
             console.log(`[clickByText] 点击坐标: (${cx.toFixed(0)}, ${cy.toFixed(0)})`, target);
 
             dispatch(target, cx, cy);
-            console.log(`[clickByText] ✅ 完成`);
-            await new Promise(resolve => setTimeout(resolve, 300));
+            await new Promise(resolve => setTimeout(resolve, 120));
             return;
         }
 
@@ -871,12 +1083,141 @@
     //     }
     // }
 
+    // 派发完整事件链，兼容 Radix UI / React 合成事件
+    function dispatchClick(el) {
+        const rect = el.getBoundingClientRect();
+        const cx = rect.x + rect.width / 2;
+        const cy = rect.y + rect.height / 2;
+        const pos = { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy };
+        el.dispatchEvent(new PointerEvent('pointerdown', { ...pos, pointerId: 1 }));
+        el.dispatchEvent(new PointerEvent('pointerup', { ...pos, pointerId: 1 }));
+        ['mouseover', 'mouseenter', 'mousemove', 'mousedown', 'mouseup', 'click'].forEach(type => {
+            el.dispatchEvent(new MouseEvent(type, pos));
+        });
+    }
+
+    // 找到含 crop_16_9 图标的设置面板切换按钮（aria-haspopup="menu"）
+    function findSettingsToggleButton() {
+        const btns = document.querySelectorAll('button[aria-haspopup="menu"]');
+        for (let i = 0; i < btns.length; i++) {
+            const icons = btns[i].querySelectorAll('i.google-symbols');
+            for (let j = 0; j < icons.length; j++) {
+                const txt = (icons[j].textContent || '').trim();
+                if (txt.startsWith('crop_')) return btns[i];
+            }
+        }
+        return null;
+    }
+
+    // 确保设置面板已打开，返回是否成功
+    async function ensureSettingsPanelOpen() {
+        if (document.querySelectorAll('button.flow_tab_slider_trigger').length >= 2) return true;
+        const btn = findSettingsToggleButton();
+        if (!btn) { console.warn('[sync] 找不到设置按钮'); return false; }
+        dispatchClick(btn);
+        for (let i = 0; i < 15; i++) {
+            await sleep(200);
+            if (document.querySelectorAll('button.flow_tab_slider_trigger').length >= 2) return true;
+        }
+        console.warn('[sync] 设置面板打开超时');
+        return false;
+    }
+
+    // 找到模型下拉按钮（有 arrow_drop_down、无 crop_ 图标）
+    function findModelDropdownButton() {
+        const btns = document.querySelectorAll('button[aria-haspopup="menu"]');
+        for (const btn of btns) {
+            const icons = btn.querySelectorAll('i.google-symbols');
+            let hasArrow = false, hasCrop = false;
+            for (const icon of icons) {
+                const t = (icon.textContent || '').trim();
+                if (t === 'arrow_drop_down') hasArrow = true;
+                if (t.startsWith('crop_')) hasCrop = true;
+            }
+            if (hasArrow && !hasCrop) return btn;
+        }
+        return null;
+    }
+
+    // 在面板内找 flow_tab_slider_trigger 按钮并点击（exact=true 精确匹配，否则包含匹配）
+    async function clickPanelTab(text, exact = false) {
+        const tabs = Array.from(document.querySelectorAll('button.flow_tab_slider_trigger'));
+        const btn = tabs.find(b => exact
+            ? (b.textContent || '').trim() === text
+            : (b.textContent || '').includes(text));
+        if (btn) { dispatchClick(btn); await sleep(300); return true; }
+        console.warn('[sync] 未找到面板按钮:', text);
+        return false;
+    }
+
+    // 打开模型下拉并点击目标项，点击后按 Escape 关闭菜单
+    async function syncModel(modelName) {
+        const btn = findModelDropdownButton();
+        if (!btn) { console.warn('[sync] 未找到模型按钮'); return; }
+        dispatchClick(btn);
+        for (let i = 0; i < 20; i++) {
+            for (const menu of document.querySelectorAll('[data-radix-menu-content]')) {
+                const span = Array.from(menu.querySelectorAll('span'))
+                    .find(el => (el.textContent || '').trim().includes(modelName));
+                if (span) {
+                    (span.closest('button') || span).click();
+                    await sleep(100);
+                    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true, cancelable: true }));
+                    return;
+                }
+            }
+            await sleep(150);
+        }
+        console.warn('[sync] 未找到模型选项:', modelName);
+    }
+
+    // 代次计数器，每次新同步请求递增，旧协程通过 stale() 检测到后自动放弃
+    let _syncGeneration = 0;
+
+    // 同步所有设置到网页（任务类型/比例/数量/模型），仅空闲时执行
+    async function syncSettingsInPage(taskType, aspectRatio, count, model) {
+        if (isExecuting) return;
+        const myGen = ++_syncGeneration;
+        const stale = () => myGen !== _syncGeneration;
+        try {
+            if (!await ensureSettingsPanelOpen()) return;
+            if (stale()) return;
+
+            // Image / Video tab
+            const tabs = Array.from(document.querySelectorAll('button.flow_tab_slider_trigger'));
+            const modeTab = tabs[taskType === 'Create Image' ? 0 : 1];
+            if (modeTab) { dispatchClick(modeTab); await sleep(400); }
+            if (stale()) return;
+
+            // 视频专属：子类型（Frames / Ingredients）
+            if (taskType !== 'Create Image') {
+                await clickPanelTab(taskType === 'Frames to Video' ? 'Frames' : 'Ingredients');
+                if (stale()) return;
+            }
+
+            // 比例（图片：16:9/4:3/1:1/3:4/9:16；视频：9:16/16:9）
+            await clickPanelTab(aspectRatio);
+            if (stale()) return;
+
+            // 数量（x1/x2/x3/x4，精确匹配）
+            await clickPanelTab(count, true);
+            if (stale()) return;
+
+            // 模型
+            await syncModel(model);
+
+        } catch (e) {
+            console.warn('[sync] 同步失败:', e.message);
+        }
+    }
+
     async function executeTask(taskId, prompt, taskType, aspectRatio, resolution, referenceImages) {
         console.log('🚀 执行任务:', taskId, taskType, prompt.substring(0, 30) + '...');
 
         if (isExecuting) return;
         isExecuting = true;
         capturedImageData = null;
+        _currentStatusTaskId = taskId;
 
         try {
             // 重置“上传完成计数”
@@ -889,34 +1230,38 @@
             // 输入prompt
             await inputPrompt(prompt)
 
-            await clickByText("crop_", "*", "arrow_forward") // 展开参数
-
-            // 任务类型
-            const useType = taskType.indexOf("Image") > -1 ? "Image" : "Video"
-            await clickByText(useType, "button", "Landscape")       // 设置任务类型
-            await clickByText("x1", "*", "arrow_forward")      // 只出1个
-
-            const useAspect = aspectRatio.indexOf("16:9") > -1 ? "Landscape" : "Portrait"
-            await clickByText(useAspect, "*", "arrow_forward") // 设置方向
-
-            if ("Image" == useType) {  // 图片
-                await selectModel('image', 'Nano Banana 2', ['Nano Banana', 'Nano Banana Pro', 'Banana 2'])
-            } else {                   // 视频
-                // 选择视频任务类型：首尾帧还是序列
-                if (taskType === 'Frames to Video') { // 
-                    await clickByText("Frames", "button", "arrow_forward")
-                } else {
-                    // Ingredients/References/垫图/素材 等文案可能因页面状态不同而变化
-                    await clickByAnyText(
-                        ['Ingredients', 'References', 'Ingredient', '素材', '垫图'],
-                        'button',
-                        'arrow_forward'
-                    )
-                }
-
-                // 设置模型，分两步：下拉、点击
-                await selectModel('video', 'Veo 3.1 - Fast', ['Veo 3.1 - Fast [Lower Priority]', 'Veo 3.1', 'Fast'])
+            // 解析通用参数（resolution 编码格式："{count}|{model}"）
+            const defaultModel = taskType === 'Create Image' ? 'Nano Banana 2' : 'Veo 3.1 - Fast [Lower Priority]';
+            let genCount = 'x1';
+            let genModel = defaultModel;
+            if (resolution && resolution.includes('|')) {
+                const parts = resolution.split('|');
+                genCount = parts[0] || 'x1';
+                genModel = parts[1] || defaultModel;
             }
+
+            // 展开设置面板并同步任务参数（复用 syncSettingsInPage 的 helper）
+            const useType = taskType.indexOf('Image') > -1 ? 'Image' : 'Video';
+            await ensureSettingsPanelOpen();
+
+            // Image / Video tab
+            const modeTabs = Array.from(document.querySelectorAll('button.flow_tab_slider_trigger'));
+            const modeTab = modeTabs[taskType === 'Create Image' ? 0 : 1];
+            if (modeTab) { dispatchClick(modeTab); await sleep(400); }
+
+            if (taskType !== 'Create Image') {
+                // 视频子类型：Frames（首尾帧）/ Ingredients（文生/图生视频）
+                await clickPanelTab(taskType === 'Frames to Video' ? 'Frames' : 'Ingredients');
+            }
+
+            // 比例
+            await clickPanelTab(aspectRatio);
+
+            // 数量（精确匹配 x1/x2/x3/x4）
+            await clickPanelTab(genCount, true);
+
+            // 模型
+            await syncModel(genModel);
 
             // 再上传图片
             if (taskType === 'Frames to Video') { // 只有首尾帧点击的是Start + End 按钮
@@ -938,6 +1283,11 @@
             // 等待：确保引用图片全部“插入完成”（基于上传完成计数）
             if (__uploadExpectedCount > 0) {
                 await waitUntil(() => __uploadDoneCount >= __uploadExpectedCount, 60000, 200);
+            }
+
+            if (__debugSkipSubmit) {
+                sendStatus('调试模式：已就绪，未提交生成');
+                return;
             }
 
             sendStatus('提交生成...');
@@ -1057,7 +1407,7 @@
                 } else {
                     sendWsMessage({ type: 'image_data', task_id: taskId, data: base64Data });
                 }
-                sendStatus('完成 ✅');
+                sendStatus('已完成');
             } else {
                 sendResult(taskId, '未获取到图片数据');
             }
@@ -1066,6 +1416,7 @@
             console.error('❌ 执行错误:', e);
             sendResult(taskId, e.message);
         } finally {
+            _currentStatusTaskId = null;
             isExecuting = false;
         }
     }
@@ -1074,6 +1425,7 @@
     function init() {
         console.log('🎯 初始化');
         handlePageChange();
+        setTimeout(() => ensureDebugToggleButton(), 300);
 
         // 如果在首页，自动点击 New project
         if (location.href === 'https://labs.google/fx/tools/flow') {

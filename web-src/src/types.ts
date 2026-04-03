@@ -79,6 +79,13 @@ export interface PyWebViewApi {
     output_dir: string,
     default_prompt?: string
   ) => Promise<CreateCustomTemplateResult>;
+  switch_task_mode: (task_type: string) => Promise<{ success: boolean; error?: string }>;
+  sync_page_settings: (
+    task_type: string,
+    aspect_ratio?: string,
+    image_count?: string,
+    image_model?: string
+  ) => Promise<{ success: boolean; error?: string }>;
 }
 
 declare global {

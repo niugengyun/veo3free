@@ -536,6 +536,35 @@ class Api:
         self.task_manager.is_running = False
         logger.info("已停止执行")
 
+    def switch_task_mode(self, task_type: str) -> dict:
+        """向所有空闲客户端广播模式切换消息，让网页联动切换 Image/Video tab"""
+        return self.sync_page_settings(task_type)
+
+    def sync_page_settings(self, task_type: str, aspect_ratio: str = '16:9',
+                           image_count: str = 'x1', image_model: str = 'Nano Banana 2') -> dict:
+        """向所有空闲客户端广播完整设置同步消息（任务类型/比例/数量/模型）"""
+        if self.loop is None:
+            return {'success': False, 'error': '事件循环未就绪'}
+
+        async def _broadcast():
+            msg = json.dumps({
+                'type': 'sync_settings',
+                'task_type': task_type,
+                'aspect_ratio': aspect_ratio,
+                'image_count': image_count,
+                'image_model': image_model,
+            }, ensure_ascii=False)
+            for _cid, info in list(self.task_manager.clients.items()):
+                if not info.get('busy'):
+                    try:
+                        await info['ws'].send(msg)
+                    except Exception:
+                        pass
+
+        asyncio.run_coroutine_threadsafe(_broadcast(), self.loop)
+        logger.info(f"发送设置同步: type={task_type} ratio={aspect_ratio} count={image_count} model={image_model}")
+        return {'success': True}
+
     async def _execute_tasks(self):
         logger.info("任务执行循环启动")
 

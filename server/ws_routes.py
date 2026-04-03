@@ -91,6 +91,7 @@ async def _handle_image_result(task_manager: Any, output_dir_base: Path, client_
         saved = await _save_base64_file(base64_data, filename, p)
         if saved:
             task["status"] = "已完成"
+            task["status_detail"] = ""
             task["end_time"] = datetime.now().isoformat()
             task["saved_path"] = str(saved)
             task["output_dir_path"] = str(p)
@@ -186,10 +187,11 @@ def register_ws_routes(app: FastAPI, task_manager: Any, output_dir_base: Path) -
                 elif msg_type == "status":
                     status_msg = data.get("message", "") or ""
                     logger.info(f"[ws] [#{page_number}] status: {status_msg}")
-                    if client_id:
-                        task_id = task_manager.clients.get(client_id, {}).get("task_id")
-                        if task_id:
-                            task_manager.update_task_status_detail(task_id, status_msg)
+                    task_id = data.get("task_id") or ""
+                    if not task_id and client_id:
+                        task_id = task_manager.clients.get(client_id, {}).get("task_id") or ""
+                    if task_id:
+                        task_manager.update_task_status_detail(task_id, status_msg)
 
         except WebSocketDisconnect:
             pass
