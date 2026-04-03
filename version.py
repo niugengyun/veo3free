@@ -5,7 +5,7 @@ from pathlib import Path
 
 APP_NAME = "veo3free"
 GITHUB_REPO = "niugengyun/veo3free"
-__version__ = "1.2.1"
+__version__ = "1.2.2"
 
 
 def get_version() -> str:

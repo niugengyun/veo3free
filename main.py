@@ -70,6 +70,17 @@ else:
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+
+def _user_desktop_dir() -> Path:
+    """系统桌面目录（兼容英文 Desktop / 中文 桌面）。"""
+    home = Path.home()
+    for name in ("Desktop", "桌面"):
+        p = home / name
+        if p.is_dir():
+            return p
+    return home
+
+
 # 配置loguru日志
 LOGS_DIR = OUTPUT_DIR.parent / "logs" if getattr(sys, 'frozen', False) else Path("logs")
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -705,9 +716,25 @@ class Api:
             "竖屏": "9:16"
         }
 
+        def _normalize_aspect_cell(val) -> str:
+            v = str(val).strip() if val is not None else ""
+            if v in ("横屏",):
+                return "16:9"
+            if v in ("竖屏",):
+                return "9:16"
+            if v in ("16:9", "9:16", "4:3", "1:1", "3:4"):
+                return v
+            return "16:9"
+
         try:
             wb = load_workbook(filepath)
             ws = wb.active
+
+            header_row = list(ws.iter_rows(min_row=1, max_row=1, values_only=True))
+            header_vals = header_row[0] if header_row else ()
+            use_aspect_model_columns = bool(
+                header_vals and len(header_vals) > 3 and str(header_vals[3] or "").strip() == "宽高比"
+            )
 
             # 第一步：验证所有行
             tasks_to_add = []
@@ -717,6 +744,7 @@ class Api:
                 if not row or not row[1]:
                     continue
 
+                row_number = ""
                 try:
                     # 读取编号列（第一列）
                     row_number = str(row[0]).strip() if row[0] else str(row_idx)
@@ -726,37 +754,47 @@ class Api:
                         continue
 
                     task_type_cn = str(row[2]).strip() if len(row) > 2 and row[2] else "图片"
-                    orientation_cn = str(row[3]).strip() if len(row) > 3 and row[3] else "横屏"
-                    resolution = str(row[4]).strip() if len(row) > 4 and row[4] else ""
-                    output_dir = str(row[5]).strip() if len(row) > 5 and row[5] else None
-
-                    # 验证任务类型
                     if task_type_cn not in task_type_map:
                         validation_errors.append(f"编号{row_number}: 未知任务类型: {task_type_cn}，请使用: {', '.join(task_type_map.keys())}")
                         continue
 
                     task_type = task_type_map[task_type_cn]
-                    aspect_ratio = orientation_map.get(orientation_cn, "16:9")
 
-                    if not resolution:
-                        resolution = "1080p" if "Video" in task_type else "4K"
+                    if use_aspect_model_columns:
+                        aspect_ratio = _normalize_aspect_cell(row[3] if len(row) > 3 else "")
+                        resolution = str(row[4]).strip() if len(row) > 4 and row[4] else ""
+                        if not resolution:
+                            resolution = (
+                                "x1|Nano Banana 2" if task_type == "Create Image" else "x1|Veo 3.1 - Fast [Lower Priority]"
+                            )
+                        elif "|" not in resolution:
+                            validation_errors.append(
+                                f"行{row_idx}: 「数量与模型」格式应为 x1|模型名，例如 x1|Nano Banana 2"
+                            )
+                            continue
                     else:
-                        # 分辨率忽略大小写处理
-                        resolution_upper = resolution.upper()
-                        resolution_lower = resolution.lower()
-                        # 标准化为正确的格式（如 4k -> 4K, 1080p -> 1080p）
-                        if resolution_upper in ["4K", "2K", "1K"]:
-                            resolution = resolution_upper
-                        elif resolution_lower == "1080p":
-                            resolution = "1080p"
-                        elif resolution_lower == "720p":
-                            resolution = "720p"
+                        orientation_cn = str(row[3]).strip() if len(row) > 3 and row[3] else "横屏"
+                        resolution = str(row[4]).strip() if len(row) > 4 and row[4] else ""
+                        aspect_ratio = orientation_map.get(orientation_cn, "16:9")
 
-                    # 验证分辨率
-                    is_valid, error_msg = validate_resolution(task_type, resolution, aspect_ratio)
-                    if not is_valid:
-                        validation_errors.append(f"行{row_idx}: {error_msg}")
-                        continue
+                        if not resolution:
+                            resolution = "1080p" if "Video" in task_type else "4K"
+                        else:
+                            resolution_upper = resolution.upper()
+                            resolution_lower = resolution.lower()
+                            if resolution_upper in ["4K", "2K", "1K"]:
+                                resolution = resolution_upper
+                            elif resolution_lower == "1080p":
+                                resolution = "1080p"
+                            elif resolution_lower == "720p":
+                                resolution = "720p"
+
+                        is_valid, error_msg = validate_resolution(task_type, resolution, aspect_ratio)
+                        if not is_valid:
+                            validation_errors.append(f"行{row_idx}: {error_msg}")
+                            continue
+
+                    output_dir = str(row[5]).strip() if len(row) > 5 and row[5] else None
 
                     reference_images = []
                     max_images = {
@@ -824,6 +862,7 @@ class Api:
         file_types = ('Excel文件 (*.xlsx)',)
         result = webview.windows[0].create_file_dialog(
             webview.SAVE_DIALOG,
+            directory=str(_user_desktop_dir()),
             file_types=file_types,
             save_filename='高级模板.xlsx'
         )
@@ -841,19 +880,154 @@ class Api:
             ws = wb.active
             ws.title = "任务列表"
 
-            headers = ["编号", "提示词", "任务类型", "屏幕方向", "分辨率", "输出文件夹",
+            # 与简单模板、单任务 UI 一致（与 web-src/src/App.tsx 中选项保持同步）
+            _img_aspects = ["16:9", "4:3", "1:1", "3:4", "9:16"]
+            _vid_aspects = ["9:16", "16:9"]
+            _img_models = ["Nano Banana 2", "Nano Banana Pro", "Imagen 4"]
+            _vid_models = [
+                "Veo 3.1 - Fast [Lower Priority]",
+                "Veo 3.1 - Lite",
+                "Veo 3.1 - Fast",
+                "Veo 3.1 - Quality",
+            ]
+
+            def _pad_template_row(cells: list) -> list:
+                r = list(cells)
+                while len(r) < 14:
+                    r.append("")
+                return r[:14]
+
+            headers = ["编号", "提示词", "任务类型", "宽高比", "数量与模型", "输出文件夹",
                        "图1", "图2", "图3", "图4", "图5", "图6", "图7", "图8"]
             for col, header in enumerate(headers, start=1):
                 ws.cell(row=1, column=col, value=header)
 
-            examples = [
-                [1, "A beautiful sunset over the ocean", "文生图片", "横屏", "4K", "sunset"],
-                [2, "A beautiful moon over the ocean", "文生图片", "竖屏", "2K", "sunset"],
-                [3, "A cute cat playing", "文生视频", "横屏", "1080p", "cats"],
-                [4, "A cute dog playing", "文生视频", "竖屏", "720p", "dogs_注意veo3竖屏视频不支持1080p"],
-                [5, "动起来", "首尾帧视频", "横屏", "1080p", "frames", "/Users/wei/Downloads/pig.jpeg"],
-                [6, "组合这些照片为一个创意视频", "图生视频", "横屏", "1080p", "collage", "/Users/wei/Downloads/pig.jpeg"],
+            examples: list = []
+            n = 1
+
+            # 文生图片：五种宽高比；数量与模型列展示 x1~x4 与三种模型
+            _img_enc = [
+                "x1|Nano Banana 2",
+                "x2|Nano Banana Pro",
+                "x3|Imagen 4",
+                "x4|Nano Banana 2",
+                "x1|Imagen 4",
             ]
+            for ar, enc in zip(_img_aspects, _img_enc):
+                examples.append(
+                    _pad_template_row(
+                        [n, f"文生图示例（{ar}）", "文生图片", ar, enc, f"out_img_{n}"]
+                    )
+                )
+                n += 1
+            # 文生图片：三种模型在 16:9 上各一行（首行已含 Nano Banana 2，补全另两种）
+            for m in ("Nano Banana Pro", "Imagen 4"):
+                examples.append(
+                    _pad_template_row(
+                        [n, f"文生图示例 16:9 {m}", "文生图片", "16:9", f"x1|{m}", f"out_img_{n}"]
+                    )
+                )
+                n += 1
+
+            # 文生视频：两种宽高比与四种模型全组合；另附 x2/x3/x4 示例
+            for var in _vid_aspects:
+                for vm in _vid_models:
+                    examples.append(
+                        _pad_template_row(
+                            [n, f"文生视频示例（{var}）", "文生视频", var, f"x1|{vm}", f"out_t2v_{n}"]
+                        )
+                    )
+                    n += 1
+            examples.append(
+                _pad_template_row(
+                    [n, "文生视频张数示例 x2", "文生视频", "9:16", "x2|Veo 3.1 - Lite", "out_t2v_cnt"]
+                )
+            )
+            n += 1
+            examples.append(
+                _pad_template_row(
+                    [n, "文生视频张数示例 x3", "文生视频", "16:9", "x3|Veo 3.1 - Fast", "out_t2v_cnt"]
+                )
+            )
+            n += 1
+            examples.append(
+                _pad_template_row(
+                    [n, "文生视频张数示例 x4", "文生视频", "9:16", "x4|Veo 3.1 - Quality", "out_t2v_cnt"]
+                )
+            )
+            n += 1
+
+            # 首尾帧视频：两宽高比；图1、图2 请用户填写本地路径（示例留空以免导入报路径无效）
+            examples.append(
+                _pad_template_row(
+                    [
+                        n,
+                        "首尾帧示例（请在图1、图2填写首帧与尾帧本地路径）",
+                        "首尾帧视频",
+                        "16:9",
+                        "x1|Veo 3.1 - Fast [Lower Priority]",
+                        "out_frames",
+                        "",
+                        "",
+                    ]
+                )
+            )
+            n += 1
+            examples.append(
+                _pad_template_row(
+                    [
+                        n,
+                        "首尾帧竖屏示例",
+                        "首尾帧视频",
+                        "9:16",
+                        "x1|Veo 3.1 - Quality",
+                        "out_frames",
+                        "",
+                        "",
+                    ]
+                )
+            )
+            n += 1
+
+            # 图生视频：三种数量档位与参考图列占位（最多 3 张）
+            examples.append(
+                _pad_template_row(
+                    [
+                        n,
+                        "图生视频示例（请在图1~图3填写参考图路径，最多3张）",
+                        "图生视频",
+                        "16:9",
+                        "x1|Veo 3.1 - Lite",
+                        "out_ing",
+                        "",
+                        "",
+                        "",
+                    ]
+                )
+            )
+            n += 1
+            examples.append(
+                _pad_template_row(
+                    [n, "图生视频 x2", "图生视频", "9:16", "x2|Veo 3.1 - Fast", "out_ing", "", ""]
+                )
+            )
+            n += 1
+            examples.append(
+                _pad_template_row(
+                    [
+                        n,
+                        "图生视频 x3",
+                        "图生视频",
+                        "9:16",
+                        "x3|Veo 3.1 - Fast [Lower Priority]",
+                        "out_ing",
+                        "",
+                        "",
+                        "",
+                    ]
+                )
+            )
+            n += 1
 
             for row_idx, example in enumerate(examples, start=2):
                 for col_idx, value in enumerate(example, start=1):
@@ -1130,14 +1304,33 @@ class Api:
             log_error_to_file("选择图片文件夹失败", e)
             return {'success': False, 'folder_path': '', 'images': [], 'error': str(e)}
 
+    def select_output_folder(self) -> dict:
+        """选择输出子目录（简单模板等），留空则任务使用默认输出目录"""
+        try:
+            start_dir = str(Path.home() / "Documents")
+            result = webview.windows[0].create_file_dialog(
+                webview.FOLDER_DIALOG,
+                directory=start_dir
+            )
+            if not result:
+                return {'success': False, 'path': ''}
+            folder_path = result[0] if isinstance(result, (list, tuple)) else result
+            return {'success': True, 'path': str(folder_path)}
+        except Exception as e:
+            log_error_to_file("选择输出文件夹失败", e)
+            return {'success': False, 'path': '', 'error': str(e)}
+
     def create_custom_template(self, images: list, task_type: str, aspect_ratio: str,
                                 resolution: str, output_dir: str, default_prompt: str) -> dict:
-        """根据图片列表和参数创建预填充的 Excel 模板"""
+        """根据图片列表和参数创建预填充的 Excel 模板。resolution 为「数量|模型」编码，与单任务一致。"""
         if Workbook is None:
             return {'success': False, 'error': '请安装 openpyxl'}
 
         if not images:
             return {'success': False, 'error': '没有图片可导出'}
+
+        if not (default_prompt or "").strip():
+            return {'success': False, 'error': '请填写默认提示词'}
 
         # 任务类型映射（英文 -> 中文）
         task_type_map = {
@@ -1146,21 +1339,12 @@ class Api:
             "Ingredients to Video": "图生视频",
         }
 
-        # 屏幕方向映射
-        orientation_map = {
-            "16:9": "横屏",
-            "9:16": "竖屏"
-        }
-
         task_type_cn = task_type_map.get(task_type, task_type)
-        orientation_cn = orientation_map.get(aspect_ratio, aspect_ratio)
 
         file_types = ('Excel文件 (*.xlsx)',)
-        # 从用户文档目录开始保存
-        start_dir = str(Path.home() / "Documents")
         result = webview.windows[0].create_file_dialog(
             webview.SAVE_DIALOG,
-            directory=start_dir,
+            directory=str(_user_desktop_dir()),
             file_types=file_types,
             save_filename='简单模板.xlsx'
         )
@@ -1178,8 +1362,8 @@ class Api:
             ws = wb.active
             ws.title = "任务列表"
 
-            # 表头
-            headers = ["编号", "提示词", "任务类型", "屏幕方向", "分辨率", "输出文件夹",
+            # 表头（与单任务一致：宽高比 + 数量与模型，不再使用屏幕方向/分辨率两列）
+            headers = ["编号", "提示词", "任务类型", "宽高比", "数量与模型", "输出文件夹",
                        "图1", "图2", "图3", "图4", "图5", "图6", "图7", "图8"]
             for col, header in enumerate(headers, start=1):
                 ws.cell(row=1, column=col, value=header)
@@ -1188,10 +1372,10 @@ class Api:
             for idx, img_path in enumerate(images, start=1):
                 row_idx = idx + 1  # 第2行开始
                 ws.cell(row=row_idx, column=1, value=idx)  # 编号
-                ws.cell(row=row_idx, column=2, value=default_prompt or "")  # 默认提示词
+                ws.cell(row=row_idx, column=2, value=default_prompt or "")  # 默认提示词（必填）
                 ws.cell(row=row_idx, column=3, value=task_type_cn)  # 任务类型
-                ws.cell(row=row_idx, column=4, value=orientation_cn)  # 屏幕方向
-                ws.cell(row=row_idx, column=5, value=resolution)  # 分辨率
+                ws.cell(row=row_idx, column=4, value=aspect_ratio)  # 宽高比，如 16:9
+                ws.cell(row=row_idx, column=5, value=resolution)  # 数量与模型，如 x1|Nano Banana 2
                 ws.cell(row=row_idx, column=6, value=output_dir or "")  # 输出文件夹
                 ws.cell(row=row_idx, column=7, value=img_path)  # 图1
 

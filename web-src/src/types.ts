@@ -39,6 +39,12 @@ export interface SelectImageFolderResult {
   error?: string;
 }
 
+export interface SelectOutputFolderResult {
+  success: boolean;
+  path: string;
+  error?: string;
+}
+
 export interface CreateCustomTemplateResult {
   success: boolean;
   filepath?: string;
@@ -71,6 +77,7 @@ export interface PyWebViewApi {
   retry_task: (task_index: number) => Promise<{ success: boolean; error?: string }>;
   retry_all_failed: () => Promise<{ success: boolean; count?: number; error?: string }>;
   select_image_folder: () => Promise<SelectImageFolderResult>;
+  select_output_folder: () => Promise<SelectOutputFolderResult>;
   create_custom_template: (
     images: string[],
     task_type: string,

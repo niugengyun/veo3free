@@ -31,6 +31,30 @@
     }
 
     let __debugSkipSubmit = loadDebugSkipSubmit();
+    let overlayMask = null;
+
+    /** 仅调整调试按钮定位，避免覆盖 syncLabel 设置的外观 */
+    function applyDebugToggleLayout(place) {
+        const el = document.getElementById('veo3free-debug-toggle');
+        if (!el) return;
+        if (place === 'overlay') {
+            el.style.setProperty('position', 'relative');
+            el.style.setProperty('left', 'auto');
+            el.style.setProperty('top', 'auto');
+            el.style.setProperty('bottom', 'auto');
+            el.style.setProperty('transform', 'none');
+            el.style.setProperty('margin-top', '8px');
+            el.style.setProperty('z-index', '2147483646');
+        } else {
+            el.style.setProperty('position', 'fixed');
+            el.style.setProperty('left', '50%');
+            el.style.setProperty('bottom', '32px');
+            el.style.setProperty('top', 'auto');
+            el.style.setProperty('transform', 'translateX(-50%)');
+            el.style.setProperty('margin-top', '0');
+            el.style.setProperty('z-index', '2147483646');
+        }
+    }
 
     function ensureDebugToggleButton() {
         const mount = () => {
@@ -46,6 +70,7 @@
                     'position:fixed',
                     'left:50%',
                     'bottom:32px',
+                    'top:auto',
                     'transform:translateX(-50%)',
                     'z-index:2147483646',
                     'padding:14px 26px',
@@ -81,8 +106,11 @@
                     syncLabel();
                 };
                 syncLabel();
+            } else {
+                const inOverlay = overlayMask && overlayMask.style.display !== 'none' && overlayMask.contains(el);
+                applyDebugToggleLayout(inOverlay ? 'overlay' : 'standalone');
             }
-            if (!root.contains(el)) {
+            if (!root.contains(el) && !(overlayMask && overlayMask.contains(el))) {
                 root.appendChild(el);
             }
             return true;
@@ -93,7 +121,6 @@
             }, 0);
         }
     }
-    let overlayMask = null;
     // 用于“按上传图片数量”控制何时允许提交生成（避免未插入完就开始）
     let __uploadExpectedCount = 0;
     let __uploadDoneCount = 0;
@@ -189,12 +216,40 @@
         }
     }
 
-    // 创建/显示全屏遮罩
-    function showOverlayMask() {
+    // 创建/显示全屏遮罩（已连接或任务执行中；程序化 click 仍可作用于下方 DOM）
+    function showOverlayMask(mode) {
         if (!isProjectPage()) return;
+
+        const busy = mode === 'busy';
+        const tipHtml = busy
+            ? `任务执行中，请勿在页面上手动点击<br/>
+            <span style="font-size: 15px; opacity: 0.95;">若需自行操作 Flow，请</span>
+            <a href="javascript:void(0)" id="veo3free-refresh-link" style="
+                color: #4fc3f7;
+                text-decoration: underline;
+                font-size: 15px;
+                cursor: pointer;
+                transition: color 0.2s;
+            ">刷新</a>页面后重试`
+            : `已与 Veo3Free 连接，页面处于托管状态<br/>
+            <span style="font-size: 15px; opacity: 0.95;">若需自行点击页面，请</span>
+            <a href="javascript:void(0)" id="veo3free-refresh-link" style="
+                color: #4fc3f7;
+                text-decoration: underline;
+                font-size: 15px;
+                cursor: pointer;
+                transition: color 0.2s;
+            ">刷新</a>页面`;
 
         if (overlayMask) {
             overlayMask.style.display = 'flex';
+            const tipEl = overlayMask.querySelector('[data-veo3free-overlay-tip]');
+            if (tipEl) {
+                tipEl.innerHTML = tipHtml;
+                bindOverlayRefreshLink(overlayMask);
+            }
+            overlayMask.dataset.veo3freeMode = busy ? 'busy' : 'idle';
+            attachDebugToggleBelowOverlayTip();
             return;
         }
 
@@ -205,7 +260,7 @@
             left: 0;
             width: 100vw;
             height: 100vh;
-            background: rgba(150, 150, 150, 0.3);
+            background: rgba(150, 150, 150, 0.35);
             z-index: 99998;
             display: flex;
             align-items: center;
@@ -213,8 +268,15 @@
             backdrop-filter: blur(1px);
             pointer-events: auto;
         `;
+        overlayMask.dataset.veo3freeMode = busy ? 'busy' : 'idle';
+
+        const overlayInner = document.createElement('div');
+        overlayInner.setAttribute('data-veo3free-overlay-inner', '1');
+        overlayInner.style.cssText =
+            'display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;max-width:92vw;';
 
         const tip = document.createElement('div');
+        tip.setAttribute('data-veo3free-overlay-tip', '1');
         tip.style.cssText = `
             color: white;
             font-size: 20px;
@@ -222,42 +284,69 @@
             text-align: center;
             text-shadow: 0 2px 10px rgba(0,0,0,0.9);
             line-height: 2;
+            max-width: 92vw;
         `;
 
-        tip.innerHTML = `
-            页面已托管至 Veo3Free App进行自动化控制<br/>
-            <span style="font-size: 15px; opacity: 0.95;">如需恢复手动模式，请</span>
-            <a href="javascript:void(0)" id="refresh-link" style="
-                color: #4fc3f7;
-                text-decoration: underline;
-                font-size: 15px;
-                cursor: pointer;
-                transition: color 0.2s;
-            ">刷新</a>页面
-        `;
+        tip.innerHTML = tipHtml;
 
-        overlayMask.appendChild(tip);
+        overlayInner.appendChild(tip);
+        overlayMask.appendChild(overlayInner);
         document.body.appendChild(overlayMask);
 
-        // 先插入 DOM，再绑定事件
-        const refreshLink = document.getElementById('refresh-link');
-        if (refreshLink) {
-            refreshLink.addEventListener('click', () => {
-                location.reload();
-            });
-            refreshLink.addEventListener('mouseenter', (e) => {
-                e.target.style.color = '#81d4fa';
-            });
-            refreshLink.addEventListener('mouseleave', (e) => {
-                e.target.style.color = '#4fc3f7';
-            });
+        bindOverlayRefreshLink(overlayMask);
+        attachDebugToggleBelowOverlayTip();
+    }
+
+    /** 将调试按钮放到遮罩文案（含「刷新页面」）下方 */
+    function attachDebugToggleBelowOverlayTip() {
+        ensureDebugToggleButton();
+        const dbg = document.getElementById('veo3free-debug-toggle');
+        if (!dbg || !overlayMask) return;
+        let inner = overlayMask.querySelector('[data-veo3free-overlay-inner]');
+        const tipEl = overlayMask.querySelector('[data-veo3free-overlay-tip]');
+        if (!tipEl) return;
+        if (!inner) {
+            inner = document.createElement('div');
+            inner.setAttribute('data-veo3free-overlay-inner', '1');
+            inner.style.cssText =
+                'display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;max-width:92vw;';
+            if (tipEl.parentNode === overlayMask) {
+                overlayMask.replaceChild(inner, tipEl);
+                inner.appendChild(tipEl);
+            } else {
+                overlayMask.appendChild(inner);
+                inner.appendChild(tipEl);
+            }
         }
+        inner.appendChild(dbg);
+        applyDebugToggleLayout('overlay');
+    }
+
+    function bindOverlayRefreshLink(root) {
+        const link = root.querySelector('#veo3free-refresh-link');
+        if (!link) return;
+        link.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            location.reload();
+        });
+        link.addEventListener('mouseenter', (e) => {
+            e.target.style.color = '#81d4fa';
+        });
+        link.addEventListener('mouseleave', (e) => {
+            e.target.style.color = '#4fc3f7';
+        });
     }
 
     // 隐藏全屏遮罩
     function hideOverlayMask() {
         if (overlayMask) {
             overlayMask.style.display = 'none';
+        }
+        const dbg = document.getElementById('veo3free-debug-toggle');
+        if (dbg && overlayMask && overlayMask.contains(dbg)) {
+            document.body.appendChild(dbg);
+            applyDebugToggleLayout('standalone');
         }
     }
 
@@ -302,7 +391,7 @@
                 clientId = data.client_id;
                 console.log('注册成功:', clientId);
                 updateButton('● 已连接 · 勿操作，断开请刷新', '#28a745', true);
-                // showOverlayMask();
+                showOverlayMask('idle');
                 return;
             }
 
@@ -1216,6 +1305,7 @@
 
         if (isExecuting) return;
         isExecuting = true;
+        showOverlayMask('busy');
         capturedImageData = null;
         _currentStatusTaskId = taskId;
 
@@ -1418,6 +1508,9 @@
         } finally {
             _currentStatusTaskId = null;
             isExecuting = false;
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                showOverlayMask('idle');
+            }
         }
     }
 

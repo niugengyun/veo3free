@@ -424,19 +424,19 @@ function App() {
   const handleImportExcel = async () => {
     if (!ready || !api) return;
     const result = await api.import_excel();
-    if (result) {
-      if (result.success) {
-        if (result.count > 0) {
-          alert(`导入成功！添加了 ${result.count} 个任务`);
-        } else {
-          const errorMsg = result.errors && result.errors.length > 0
-            ? `没有有效的任务被导入\n\n原因:\n${result.errors.slice(0, 3).join('\n')}${result.errors.length > 3 ? '\n...' : ''}`
-            : '没有有效的任务被导入';
-          alert(errorMsg);
-        }
-      } else {
-        alert(`导入失败: ${result.errors?.[0] || '未知错误'}`);
-      }
+    if (!result) return;
+    if (!result.success) {
+      if (!result.errors?.length) return;
+      alert(`导入失败: ${result.errors[0]}`);
+      return;
+    }
+    if (result.count > 0) {
+      alert(`导入成功！添加了 ${result.count} 个任务`);
+    } else {
+      const errorMsg = result.errors && result.errors.length > 0
+        ? `没有有效的任务被导入\n\n原因:\n${result.errors.slice(0, 3).join('\n')}${result.errors.length > 3 ? '\n...' : ''}`
+        : '没有有效的任务被导入';
+      alert(errorMsg);
     }
   };
 
