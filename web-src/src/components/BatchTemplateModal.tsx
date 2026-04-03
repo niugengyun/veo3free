@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { X, FolderOpen, FileSpreadsheet, Loader2, Check, ChevronRight, Image, Film, Sparkles, FolderInput } from 'lucide-react';
+import { X, FolderOpen, FileSpreadsheet, Loader2, Check, ChevronRight, Image, Film, Sparkles } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
 interface BatchTemplateModalProps {
@@ -425,7 +425,7 @@ export function BatchTemplateModal({ isOpen, onClose }: BatchTemplateModalProps)
                         disabled={pickingOutput}
                         className="shrink-0 flex items-center gap-2 px-4 py-3 rounded-xl border border-violet-200 bg-violet-50 text-violet-700 text-sm font-medium hover:bg-violet-100 disabled:opacity-50"
                       >
-                        {pickingOutput ? <Loader2 className="w-4 h-4 animate-spin" /> : <FolderInput className="w-4 h-4" />}
+                        {pickingOutput ? <Loader2 className="w-4 h-4 animate-spin" /> : <FolderOpen className="w-4 h-4" />}
                         选择
                       </button>
                     </div>
